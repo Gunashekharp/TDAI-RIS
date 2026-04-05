@@ -1,0 +1,116 @@
+name: Deploy Fly.io
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-dicoogle:
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create tdairad-dicoogle app if not exists
+        run: |
+          flyctl apps create tdairad-dicoogle --org personal 2>&1 || echo "App may already exist, continuing..."
+
+      - name: Ensure tdairad-dicoogle has public IPv4
+        run: |
+          flyctl ips allocate-v4 --shared --app tdairad-dicoogle 2>&1 || echo "IPv4 may already exist, continuing..."
+
+      - name: Ensure dicoogle volume exists
+        run: |
+          flyctl volumes create dicoogle_data --size 40 --region iad --app tdairad-dicoogle --yes 2>&1 || echo "Volume may already exist, continuing..."
+
+      - name: Deploy tdairad-dicoogle
+        working-directory: metupalle-jpg/tdai/packages/dicoogle-server
+        run: |
+          flyctl deploy --remote-only --app tdairad-dicoogle
+
+  deploy-api:
+    runs-on: ubuntu-latest
+    needs: deploy-dicoogle
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy tdairad-api
+        working-directory: metupalle-jpg/tdai
+        run: |
+          flyctl deploy --remote-only --app tdairad-api
+
+  deploy-ohif:
+    runs-on: ubuntu-latest
+    needs: [deploy-api, deploy-dicoogle]
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create tdairad-ohif app if not exists
+        run: |
+          flyctl apps create tdairad-ohif --org personal 2>&1 || echo "App may already exist, continuing..."
+
+      - name: Deploy tdairad-ohif
+        working-directory: metupalle-jpg/tdai/packages/ohif-viewer
+        run: |
+          flyctl deploy --remote-only --app tdairad-ohif
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: deploy-api
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create tdairad-frontend app if not exists
+        run: |
+          flyctl apps create tdairad-frontend --org personal 2>&1 || echo "App may already exist, continuing..."
+
+      - name: Deploy tdairad-frontend
+        working-directory: metupalle-jpg/tdai
+        run: |
+          flyctl deploy --remote-only --app tdairad-frontend --config packages/reporting-app/frontend/fly.toml --build-arg VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }} --build-arg VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }} --build-arg VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }} --build-arg VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    needs: [deploy-dicoogle, deploy-api, deploy-ohif, deploy-frontend]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run post-deploy smoke checks
+        run: |
+          python3 metupalle-jpg/tdai/scripts/post_deploy_smoke.py \
+            --api-base-url "${SMOKE_API_BASE_URL:-https://tdairad-api.fly.dev}" \
+            --output metupalle-jpg/tdai/tests/artifacts/post_deploy_smoke.json
+        env:
+          SMOKE_API_BASE_URL: ${{ vars.SMOKE_API_BASE_URL }}
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-smoke-report
+          path: metupalle-jpg/tdai/tests/artifacts/post_deploy_smoke.json
